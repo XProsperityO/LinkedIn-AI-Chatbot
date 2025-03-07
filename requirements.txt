@@ -1,0 +1,6 @@
+selenium==4.18.1
+chatterbot==1.0.5
+chatterbot_corpus==1.2.0
+spacy==3.7.4
+requests==2.31.0
+python-dotenv==1.0.1

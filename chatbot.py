@@ -2,145 +2,107 @@
 
 import spacy
 from chatterbot import ChatBot
-from chatterbot.trainers import ChatterBotCorpusTrainer
+from chatterbot.trainers import ChatterBotCorpusTrainer, ListTrainer
+from typing import Dict, List, Optional, Union, Any
 import requests
 import logging
 import json
 from datetime import datetime
 from dotenv import load_dotenv
 import os
+import config
+import time
+import random
 
 # Load environment variables securely from .env file
 load_dotenv()
 
-# Initialize spaCy NLP model for intent recognition
-nlp = spacy.load('en_core_web_sm')
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename=config.LOG_FILE,
+    filemode='a'
+)
+logger = logging.getLogger(__name__)
 
-# Initialize ChatterBot instance
-chatbot = ChatBot('LinkedInChatBot')
+class LinkedInChatBot:
+    """
+    AI chatbot for LinkedIn marketing and sales conversations.
+    Uses ChatterBot with custom training data focused on marketing.
+    """
 
-# Train chatbot initially (run separately)
-def train_bot():
-    trainer = ChatterBotCorpusTrainer(chatbot)
-    trainer.train('chatterbot.corpus.english')
+    def __init__(self, name: str = "LinkedInAIBot"):
+        """
+        Initialize the chatbot.
 
-# Intent recognition function using spaCy NLP model (rule-based)
-def recognize_intent(user_input):
-    doc = nlp(user_input.lower())
-    greeting_keywords = {"hi", "hello", "hey", "greetings"}
-    goodbye_keywords = {"bye", "goodbye", "see you"}
-    interest_keywords = {"pricing", "services", "demo", "quote", "consultation", "contact"}
-    website_keywords = {"website", "web", "link", "site"}
+        Args:
+            name: Name of the chatbot
+        """
+        self.name = name
+        self.bot = None
+        self.conversation_history = {}
+        self.trained = False
 
-    if any(token.text in greeting_keywords for token in doc):
-        return "greeting"
-    elif any(token.text in goodbye_keywords for token in doc):
-        return "goodbye"
-    elif any(token.text in interest_keywords for token in doc):
-        return "interest_lead"
-    elif any(token.text in {"website", "link", "web"} for token in doc):
-        return "website_request"
-    else:
-        return "general"
+        # Load spaCy model for NLP tasks
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+            logger.info("Loaded spaCy model for NLP")
+        except OSError:
+            logger.warning("spaCy model not found. Downloading...")
+            os.system("python -m spacy download en_core_web_sm")
+            self.nlp = spacy.load("en_core_web_sm")
 
-# CRM Integration (Example: Salesforce via REST API)
-def send_lead_to_salesforce(name, email, message):
-    SALESFORCE_API_URL = os.getenv("SALESFORCE_API_URL")
-    SALESFORCE_ACCESS_TOKEN = os.getenv("SALESFORCE_ACCESS_TOKEN")
+        self.initialize_bot()
 
-    headers = {
-        'Authorization': f'Bearer {os.getenv("SALESFORCE_API_KEY")}',
-        'Content-Type': 'application/json'
-    }
+    def initialize_bot(self) -> None:
+        """Initialize the chatbot with appropriate settings."""
+        try:
+            self.bot = ChatBot(
+                self.name,
+                storage_adapter="chatterbot.storage.SQLStorageAdapter",
+                database_uri=f"sqlite:///{config.DB_PATH}",
+                logic_adapters=[
+                    {
+                        "import_path": "chatterbot.logic.BestMatch",
+                        "default_response": "I'm not sure how to respond to that.",
+                        "maximum_similarity_threshold": 0.65
+                    },
+                    {
+                        "import_path": "chatterbot.logic.MathematicalEvaluation"
+                    }
+                ],
+                preprocessing=["chatterbot.preprocessors.clean_whitespace"]
+            )
+            logger.info(f"Initialized chatbot: {self.name}")
+        except Exception as e:
+            logger.error(f"Error initializing chatbot: {str(e)}")
+            raise
 
-    data = {
-        'FirstName': name.split()[0],
-        'LastName': name.split()[-1],
-        'Email': f"{name.replace(' ', '').lower()}@example.com",
-        'LeadSource': 'LinkedIn Chatbot',
-        'Description': f"Inbound lead captured via LinkedIn chatbot on {datetime.now().isoformat()}"
-    }
+    def train(self, training_data: Optional[List[List[str]]] = None) -> None:
+        """
+        Train the chatbot using corpus data and optionally custom data.
 
-    response = requests.post(
-        os.getenv("SALESFORCE_API_ENDPOINT"),
-        headers=headers,
-        data=json.dumps(data)
-    )
+        Args:
+            training_data: Optional list of conversation pairs for training
+        """
+        if not self.bot:
+            logger.error("Bot not initialized. Cannot train.")
+            return
 
-    if response.status_code == 201:
-        log_event("CRM Integration Success", f"Lead added: {name}")
-    else:
-        log_error("CRM Integration Failed", response=response.text)
+        try:
+            # Train with corpus data first
+            corpus_trainer = ChatterBotCorpusTrainer(self.bot)
+            corpus_trainer.train("chatterbot.corpus.english")
+            logger.info("Completed corpus training")
 
-# Analytics & Logging setup
-def log_interaction(user_message, bot_response, intent):
-    log_entry = {
-        'timestamp': datetime.now().isoformat(),
-        'user_message': user_message,
-        'bot_response': bot_response,
-        'intent': intent,
-    }
-    with open('chat_logs.jsonl', 'a') as logfile:
-        logfile.write(json.dumps(log_entry) + "\n")
+            # If custom training data provided, train with that
+            if training_data:
+                list_trainer = ListTrainer(self.bot)
+                for conversation in training_data:
+                    list_trainer.train(conversation)
 
-def log_error(error_message, response=""):
-    error_entry = {
-        'timestamp': datetime.now().isoformat(),
-        'error_message': error_message,
-        'response': response if response else ""
-    }
-    with open('error_logs.jsonl', 'a') as f:
-        f.write(json.dumps(log_entry) + '\n')
-
-# Continuous Retraining (simple example)
-def retrain_chatbot(new_conversation_pairs):
-    trainer = ChatterBotCorpusTrainer(chatbot)
-
-    # Assume new conversations are stored in a JSONL file called new_conversations.jsonl
-    with open('new_training_data.jsonl', 'a') as f:
-        for pair in new_conversations:
-            f.write(json.dumps(pair) + '\n')
-
-    # Load and retrain periodically (e.g., weekly)
-    trainer.train('chatterbot.corpus.english')
-    log_interaction("System", "Retrained chatbot with latest data.", "system_update")
-
-# Generate chatbot responses integrated with CRM and logging
-def get_bot_response(user_message, user_name="User"):
-    intent = recognize_intent(user_message)
-
-    if intent == "greeting":
-        response_text = "Hello! Welcome to Prosparity AI. How can I assist you today?"
-
-    elif intent == "goodbye":
-        response_text = ("Goodbye! Feel free to visit us anytime at https://prosparityai.com.")
-
-    elif intent == "interest_lead":
-        response_text = ("It sounds like you're interested in our offerings! "
-                        "Please visit our website at https://prosparityai.com to learn more or schedule a consultation.")
-
-        # Send lead to Salesforce CRM automatically as inbound lead example (dummy name used here)
-        send_lead_to_salesforce(name="LinkedIn User")
-
-    elif intent == "website_request":
-        response_text = ("You can explore more about us directly at our official website: https://prosparityai.com")
-
-    else:
-        response = chatbot.get_response(user_message)
-
-        if response.confidence < 0.6:
-            response_text = ("I'm not sure I fully understand your request. "
-                            "Please visit https://prosparityai.com for detailed information.")
-            intent = "fallback"
-        else:
-            response_text = str(response)
-
-    # Log interaction details for analytics purposes.
-    log_interaction(user_message, response_text, intent)
-
-    return response_text
-
-if __name__ == "__main__":
-    print("Training chatbot...")
-    train_bot()
-    print("Training complete.")
+            self.trained = True
+            logger.info("Chatbot training complete")
+        except Exception as e:
+            logger.error
